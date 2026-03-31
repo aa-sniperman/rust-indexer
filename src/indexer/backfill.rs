@@ -17,22 +17,45 @@ pub async fn run_backfill(rpc_url: &str, start_block: u64, repository: Repositor
     let (durable_tx, durable_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
     let _durable_task = tokio::spawn(run_durable_worker(repository.clone(), durable_rx));
-
-    let mut next_block = repository
-        .get_backfill_resume_block(BACKFILL_JOB_NAME, start_block)
-        .await?;
-    info!(
-        job_name = BACKFILL_JOB_NAME,
-        next_block, "starting backfill"
-    );
+    let mut next_block: Option<u64> = None;
 
     loop {
         let latest_block = client.get_latest_block_number().await?;
 
-        if next_block > latest_block {
+        if next_block.is_none() {
+            let resume_block = repository
+                .get_backfill_resume_block(BACKFILL_JOB_NAME, start_block)
+                .await?;
+            let has_progress = repository
+                .postgres()
+                .get_backfill_progress(BACKFILL_JOB_NAME)
+                .await?
+                .is_some();
+
+            let resolved_start_block = if !has_progress && start_block == 0 {
+                latest_block.saturating_sub(1)
+            } else {
+                resume_block
+            };
+
+            next_block = Some(resolved_start_block);
+
             info!(
                 job_name = BACKFILL_JOB_NAME,
-                next_block,
+                configured_start_block = start_block,
+                latest_block,
+                has_progress,
+                next_block = resolved_start_block,
+                "starting backfill"
+            );
+        }
+
+        let current_next_block = next_block.expect("backfill next block should be initialized");
+
+        if current_next_block > latest_block {
+            info!(
+                job_name = BACKFILL_JOB_NAME,
+                next_block = current_next_block,
                 latest_block,
                 sleep_secs = LATEST_POLL_INTERVAL_SECS,
                 "backfill caught up, waiting for new blocks"
@@ -41,7 +64,7 @@ pub async fn run_backfill(rpc_url: &str, start_block: u64, repository: Repositor
             continue;
         }
 
-        for block_number in next_block..=latest_block {
+        for block_number in current_next_block..=latest_block {
             let maybe_block = client.get_block_by_number(block_number).await?;
             let Some(block) = maybe_block else {
                 warn!(block_number, "upstream returned null block during backfill");
@@ -94,7 +117,7 @@ pub async fn run_backfill(rpc_url: &str, start_block: u64, repository: Repositor
                 .save_backfill_progress(BACKFILL_JOB_NAME, block_number as i64)
                 .await?;
 
-            next_block = block_number + 1;
+            next_block = Some(block_number + 1);
 
             info!(
                 block_number,
