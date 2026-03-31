@@ -15,7 +15,7 @@ pub struct ShredTxRecord {
     pub tx_type: Option<String>,
     pub receipt_status: Option<String>,
     pub transaction_json: String,
-    pub receipt_json: String,
+    pub receipt_json: Option<String>,
     pub state_changes_json: Option<String>,
     pub source: String,
 }
@@ -24,6 +24,37 @@ pub struct ShredTxRecord {
 pub struct BackfillProgress {
     pub job_name: String,
     pub last_completed_block: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct JsonRpcRequest {
+    #[serde(default = "default_jsonrpc")]
+    pub jsonrpc: String,
+    pub method: String,
+    #[serde(default = "default_params")]
+    pub params: Value,
+    #[serde(default)]
+    pub id: Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct JsonRpcSuccessResponse {
+    pub jsonrpc: &'static str,
+    pub id: Value,
+    pub result: Value,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct JsonRpcErrorResponse {
+    pub jsonrpc: &'static str,
+    pub id: Value,
+    pub error: JsonRpcErrorObject,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct JsonRpcErrorObject {
+    pub code: i64,
+    pub message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,7 +186,7 @@ impl ShredTxRecord {
                 .get("status")
                 .and_then(value_to_lossy_string),
             transaction_json: envelope.transaction.to_string(),
-            receipt_json: envelope.receipt.to_string(),
+            receipt_json: Some(envelope.receipt.to_string()),
             state_changes_json: if state_changes.is_null() {
                 None
             } else {
@@ -192,11 +223,130 @@ impl ShredTxRecord {
             tx_type: transaction.tx_type.clone(),
             receipt_status: receipt.status.clone(),
             transaction_json: transaction.raw.to_string(),
-            receipt_json: receipt.raw.to_string(),
+            receipt_json: Some(receipt.raw.to_string()),
             state_changes_json: None,
             source: source.to_owned(),
         }
     }
+
+    pub fn from_backfill_tx_only(
+        block: &RpcBlock,
+        transaction: RpcTransaction,
+        source: &str,
+    ) -> Self {
+        let block_number = block.number.as_deref().and_then(parse_i64_from_str);
+        let block_timestamp = block.timestamp.as_deref().and_then(parse_i64_from_str);
+        let tx_offset_in_shred = transaction
+            .transaction_index
+            .as_deref()
+            .and_then(parse_optional_i32_str)
+            .unwrap_or_default();
+
+        Self {
+            tx_hash: transaction.hash.clone(),
+            block_number,
+            block_timestamp,
+            block_hash: block.hash.clone(),
+            shred_idx: None,
+            tx_offset_in_shred,
+            starting_log_index: None,
+            signer: transaction.from_address.clone(),
+            to_address: transaction.to.clone(),
+            tx_type: transaction.tx_type.clone(),
+            receipt_status: None,
+            transaction_json: transaction.raw.to_string(),
+            receipt_json: None,
+            state_changes_json: None,
+            source: source.to_owned(),
+        }
+    }
+
+    pub fn from_rpc_values(
+        transaction: Value,
+        receipt: Option<Value>,
+        source: &str,
+    ) -> Option<Self> {
+        let tx_hash = transaction
+            .get("hash")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.get("transactionHash"))
+                    .and_then(Value::as_str)
+            })
+            .map(str::to_owned)?;
+
+        Some(Self {
+            tx_hash,
+            block_number: transaction
+                .get("blockNumber")
+                .or_else(|| {
+                    receipt
+                        .as_ref()
+                        .and_then(|receipt| receipt.get("blockNumber"))
+                })
+                .and_then(parse_optional_i64_value),
+            block_timestamp: None,
+            block_hash: transaction
+                .get("blockHash")
+                .or_else(|| {
+                    receipt
+                        .as_ref()
+                        .and_then(|receipt| receipt.get("blockHash"))
+                })
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            shred_idx: None,
+            tx_offset_in_shred: transaction
+                .get("transactionIndex")
+                .or_else(|| {
+                    receipt
+                        .as_ref()
+                        .and_then(|receipt| receipt.get("transactionIndex"))
+                })
+                .and_then(parse_optional_i32_value)
+                .unwrap_or_default(),
+            starting_log_index: None,
+            signer: transaction
+                .get("from")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            to_address: transaction
+                .get("to")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            tx_type: transaction.get("type").and_then(value_to_lossy_string),
+            receipt_status: receipt
+                .as_ref()
+                .and_then(|receipt| receipt.get("status"))
+                .and_then(value_to_lossy_string),
+            transaction_json: transaction.to_string(),
+            receipt_json: receipt.map(|receipt| receipt.to_string()),
+            state_changes_json: None,
+            source: source.to_owned(),
+        })
+    }
+}
+
+pub fn parse_transaction_value(record: &ShredTxRecord) -> Result<Value, serde_json::Error> {
+    serde_json::from_str(&record.transaction_json)
+}
+
+pub fn parse_receipt_value(record: &ShredTxRecord) -> Result<Option<Value>, serde_json::Error> {
+    record
+        .receipt_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+}
+
+fn default_jsonrpc() -> String {
+    "2.0".to_string()
+}
+
+fn default_params() -> Value {
+    Value::Array(Vec::new())
 }
 
 fn parse_optional_i32_value(value: &Value) -> Option<i32> {

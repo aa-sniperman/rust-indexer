@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::{sync::mpsc, time::sleep};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{models::ShredTxRecord, rpc::http::RiseHttpClient, store::repository::Repository};
 
@@ -10,13 +10,12 @@ const CHANNEL_CAPACITY: usize = 1024;
 const DURABILITY_RETRY_DELAY_SECS: u64 = 2;
 const BACKFILL_JOB_NAME: &str = "backfill";
 const LATEST_POLL_INTERVAL_SECS: u64 = 10;
+const RECEIPT_FETCH_THRESHOLD: usize = 10;
 
 pub async fn run_backfill(rpc_url: &str, start_block: u64, repository: Repository) -> Result<()> {
     let client = RiseHttpClient::new(rpc_url)?;
-    let (cache_tx, cache_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (durable_tx, durable_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
-    let _cache_task = tokio::spawn(run_cache_worker(repository.clone(), cache_rx));
     let _durable_task = tokio::spawn(run_durable_worker(repository.clone(), durable_rx));
 
     let mut next_block = repository
@@ -58,6 +57,8 @@ pub async fn run_backfill(rpc_url: &str, start_block: u64, repository: Repositor
             let existing_tx_hashes = repository.get_existing_tx_hashes(&tx_hashes).await?;
             let mut skipped_existing = 0usize;
             let mut enqueued_missing = 0usize;
+            let missing_count = tx_count.saturating_sub(existing_tx_hashes.len());
+            let tx_only_mode = missing_count > RECEIPT_FETCH_THRESHOLD;
 
             for transaction in block.transactions.iter().cloned() {
                 let tx_hash = transaction.hash.clone();
@@ -68,22 +69,22 @@ pub async fn run_backfill(rpc_url: &str, start_block: u64, repository: Repositor
                     continue;
                 }
 
-                let receipt = match client.get_transaction_receipt(&tx_hash).await? {
-                    Some(receipt) => receipt,
-                    None => {
-                        warn!(%tx_hash, block_number, "missing receipt during backfill");
-                        continue;
-                    }
+                let record = if tx_only_mode {
+                    ShredTxRecord::from_backfill_tx_only(&block, transaction, "backfill")
+                } else {
+                    let receipt = match client.get_transaction_receipt(&tx_hash).await? {
+                        Some(receipt) => receipt,
+                        None => {
+                            warn!(%tx_hash, block_number, "missing receipt during backfill");
+                            continue;
+                        }
+                    };
+
+                    ShredTxRecord::from_backfill(&block, transaction, receipt, "backfill")
                 };
 
-                let record = ShredTxRecord::from_backfill(&block, transaction, receipt, "backfill");
-
-                if let Err(error) = cache_tx.send(record.clone()).await {
-                    error!(%tx_hash, %error, "failed to enqueue backfill cache write");
-                }
-
                 if let Err(error) = durable_tx.send(record).await {
-                    error!(%tx_hash, %error, "failed to enqueue backfill durable write");
+                    warn!(%tx_hash, %error, "failed to enqueue backfill durable write");
                 }
 
                 enqueued_missing += 1;
@@ -101,22 +102,6 @@ pub async fn run_backfill(rpc_url: &str, start_block: u64, repository: Repositor
             );
         }
     }
-}
-
-async fn run_cache_worker(
-    repository: Repository,
-    mut receiver: mpsc::Receiver<ShredTxRecord>,
-) -> Result<()> {
-    while let Some(record) = receiver.recv().await {
-        let tx_hash = record.tx_hash.clone();
-        if let Err(error) = repository.cache_shred_tx(&record).await {
-            error!(%tx_hash, %error, "failed to cache backfill record");
-        } else {
-            debug!(%tx_hash, "cached backfill record");
-        }
-    }
-
-    Ok(())
 }
 
 async fn run_durable_worker(

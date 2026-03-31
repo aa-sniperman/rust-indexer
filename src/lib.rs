@@ -2,6 +2,7 @@ pub mod config;
 pub mod indexer;
 pub mod models;
 pub mod rpc;
+pub mod server;
 pub mod store;
 
 use tracing_subscriber::EnvFilter;

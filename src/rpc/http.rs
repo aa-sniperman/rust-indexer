@@ -31,11 +31,31 @@ impl RiseHttpClient {
             .await
     }
 
+    pub async fn get_transaction_by_hash(&self, tx_hash: &str) -> Result<Option<Value>> {
+        self.rpc_call("eth_getTransactionByHash", json!([tx_hash]))
+            .await
+    }
+
     pub async fn get_latest_block_number(&self) -> Result<u64> {
         let result: Option<String> = self.rpc_call("eth_blockNumber", json!([])).await?;
         let latest = result.context("upstream returned null for eth_blockNumber")?;
         parse_u64_from_rpc_hex(&latest)
             .with_context(|| format!("invalid eth_blockNumber response: {latest}"))
+    }
+
+    pub async fn send_jsonrpc(&self, payload: &Value) -> Result<Value> {
+        let response = self
+            .client
+            .post(&self.url)
+            .json(payload)
+            .send()
+            .await
+            .context("failed to call upstream json-rpc")?;
+
+        response
+            .json()
+            .await
+            .context("invalid upstream json-rpc response")
     }
 
     async fn rpc_call<T>(&self, method: &str, params: Value) -> Result<Option<T>>

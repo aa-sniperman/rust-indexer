@@ -125,7 +125,7 @@ mod tests {
             tx_type: Some("0x2".to_string()),
             receipt_status: Some("0x1".to_string()),
             transaction_json: r#"{"hash":"0xtesthash"}"#.to_string(),
-            receipt_json: r#"{"transactionHash":"0xtesthash"}"#.to_string(),
+            receipt_json: Some(r#"{"transactionHash":"0xtesthash"}"#.to_string()),
             state_changes_json: Some(r#"{"0xabc":{"nonce":1}}"#.to_string()),
             source: "test".to_string(),
         }
