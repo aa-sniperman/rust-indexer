@@ -26,6 +26,22 @@ cp .env.example .env
 
 By default, `BACKFILL_START_BLOCK=0` means: if there is no backfill checkpoint yet, the backfiller starts from `latest_block - 1` instead of from genesis.
 
+Key environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `RISE_HTTP_RPC_URL` | Upstream HTTP JSON-RPC endpoint used by the backfiller and by the JSON-RPC server for passthrough and on-demand fill |
+| `RISE_WS_RPC_URL` | Upstream WebSocket endpoint used by the realtime ingestor to subscribe to `shreds` |
+| `POSTGRES_URL` | Durable local store for indexed records and backfill progress |
+| `REDIS_URL` | Hot cache for recently served transaction and receipt lookups |
+| `SERVER_BIND_ADDR` | Bind address for the local JSON-RPC server |
+| `BACKFILL_START_BLOCK` | Initial backfill start block when no checkpoint exists yet; `0` means start near the latest block |
+| `BACKFILL_BATCH_SIZE` | Reserved concurrency knob for future backfill throughput tuning |
+| `REDIS_TTL_SECS` | TTL for cached transaction and receipt entries in Redis |
+| `REDIS_MAX_MEMORY` | Redis max memory limit in Docker Compose |
+| `REDIS_MAX_MEMORY_POLICY` | Redis eviction policy; this PoC uses `allkeys-lfu` |
+| `LOG_LEVEL` | Log verbosity for all Rust services |
+
 Start the full stack:
 
 ```bash
